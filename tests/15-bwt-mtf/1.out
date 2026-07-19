@@ -1,0 +1,4 @@
+bwt_primary=3
+bwt_last=6e6e62616161
+mtf=110,0,99,99,0,0
+roundtrip=OK

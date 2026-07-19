@@ -1,0 +1,7 @@
+LIT a
+LIT b
+LIT c
+LIT d
+LIT e
+MATCH 5 5
+LIT f

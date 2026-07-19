@@ -1,0 +1,4 @@
+input_bytes=5
+compressed_bits=8
+ratio=20.0%
+roundtrip=OK

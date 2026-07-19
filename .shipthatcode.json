@@ -1,0 +1,7 @@
+{
+  "course": "build-compression",
+  "language": "c",
+  "language_id": 50,
+  "entrypoint": "main.c",
+  "version": 1
+}
