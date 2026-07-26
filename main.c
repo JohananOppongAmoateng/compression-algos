@@ -2,100 +2,29 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define MAX_NODES 512
-#define MAX_CODE 256
+#define MAX_SYMBOLS 256
+#define MAX_BITS 16
 #define MAX_LINE 4096
 
-typedef struct Node {
-    unsigned char byte;
-    int is_leaf;
-    struct Node *left;
-    struct Node *right;
-} Node;
+typedef struct {
+    int symbol;
+    int length;
+    unsigned int code;
+} Entry;
 
-Node nodes[MAX_NODES];
-int node_count;
-
-Node *new_node(void) {
-    Node *n = &nodes[node_count++];
-    n->byte = 0;
-    n->is_leaf = 0;
-    n->left = NULL;
-    n->right = NULL;
-    return n;
+int cmp_length_then_symbol(const void *a, const void *b) {
+    const Entry *ea = a, *eb = b;
+    if (ea->length != eb->length)
+        return ea->length - eb->length;
+    return ea->symbol - eb->symbol;
 }
 
-/* Insert a code into the trie. Returns 0 on success, -1 on conflict. */
-int insert_code(Node *root, unsigned char symbol, const char *code) {
-    Node *cur = root;
-    size_t i, len = strlen(code);
-
-    if (len == 0)
-        return -1;
-
-    for (i = 0; i < len; i++) {
-        char bit = code[i];
-        Node **child;
-
-        if (bit != '0' && bit != '1')
-            return -1;
-        if (cur->is_leaf)
-            return -1; /* prefix conflict */
-
-        child = (bit == '0') ? &cur->left : &cur->right;
-        if (!*child)
-            *child = new_node();
-        cur = *child;
-    }
-
-    if (cur->is_leaf || cur->left || cur->right)
-        return -1; /* duplicate or prefix of existing */
-    cur->is_leaf = 1;
-    cur->byte = symbol;
-    return 0;
-}
-
-void decode(Node *root, const char *bits) {
-    Node *state = root;
-    size_t i, len = strlen(bits);
-    char *out;
-    size_t out_len = 0;
-
-    out = malloc(len + 1);
-    if (!out) {
-        fprintf(stderr, "out of memory\n");
-        exit(1);
-    }
-
-    for (i = 0; i < len; i++) {
-        char bit = bits[i];
-
-        if (bit != '0' && bit != '1') {
-            free(out);
-            fputs("ERR truncated", stdout);
-            return;
-        }
-
-        state = (bit == '0') ? state->left : state->right;
-        if (!state) {
-            free(out);
-            fputs("ERR truncated", stdout);
-            return;
-        }
-        if (state->is_leaf) {
-            out[out_len++] = (char)state->byte;
-            state = root;
-        }
-    }
-
-    if (state != root) {
-        free(out);
-        fputs("ERR truncated", stdout);
-        return;
-    }
-
-    fwrite(out, 1, out_len, stdout);
-    free(out);
+/* Format `code` as `length` bits into buf (NUL-terminated). */
+void format_code(unsigned int code, int length, char *buf) {
+    int i;
+    for (i = 0; i < length; i++)
+        buf[i] = (code & (1u << (length - 1 - i))) ? '1' : '0';
+    buf[length] = '\0';
 }
 
 void strip_newline(char *s) {
@@ -105,37 +34,74 @@ void strip_newline(char *s) {
 }
 
 int main(void) {
+    Entry entries[MAX_SYMBOLS];
+    Entry sorted[MAX_SYMBOLS];
+    int n = 0;
+    int i;
+    int bl_count[MAX_BITS + 1] = {0};
+    unsigned int next_code[MAX_BITS + 1] = {0};
+    int max_len = 0;
     char line[MAX_LINE];
-    int n, i;
-    Node *root;
+    char bits[MAX_BITS + 1];
 
-    if (!fgets(line, sizeof line, stdin))
-        return 0;
-    if (sscanf(line, "%d", &n) != 1 || n < 0)
-        return 1;
-
-    node_count = 0;
-    root = new_node();
+    while (fgets(line, sizeof line, stdin)) {
+        int symbol, length;
+        strip_newline(line);
+        if (line[0] == '\0')
+            continue;
+        if (sscanf(line, "%d %d", &symbol, &length) != 2)
+            return 1;
+        if (symbol < 0 || symbol > 255 || length < 0 || length > MAX_BITS)
+            return 1;
+        if (n >= MAX_SYMBOLS)
+            return 1;
+        entries[n].symbol = symbol;
+        entries[n].length = length;
+        entries[n].code = 0;
+        n++;
+    }
 
     for (i = 0; i < n; i++) {
-        int symbol;
-        char code[MAX_CODE];
-
-        if (!fgets(line, sizeof line, stdin))
-            return 1;
-        if (sscanf(line, "%d %255s", &symbol, code) != 2)
-            return 1;
-        if (symbol < 0 || symbol > 255)
-            return 1;
-        if (insert_code(root, (unsigned char)symbol, code) != 0)
-            return 1;
+        if (entries[i].length > 0)
+            bl_count[entries[i].length]++;
+        if (entries[i].length > max_len)
+            max_len = entries[i].length;
     }
 
-    if (!fgets(line, sizeof line, stdin)) {
-        decode(root, "");
-        return 0;
+    /* RFC 1951 §3.2.2 step 2 */
+    next_code[1] = 0;
+    for (i = 2; i <= max_len; i++)
+        next_code[i] = (next_code[i - 1] + (unsigned int)bl_count[i - 1]) << 1;
+
+    /* Step 3: assign in (length, symbol) order */
+    memcpy(sorted, entries, (size_t)n * sizeof(Entry));
+    qsort(sorted, (size_t)n, sizeof(Entry), cmp_length_then_symbol);
+
+    for (i = 0; i < n; i++) {
+        int len = sorted[i].length;
+        unsigned int code;
+        int j;
+
+        if (len == 0)
+            continue;
+        code = next_code[len]++;
+        /* Write code back onto the matching original entry. */
+        for (j = 0; j < n; j++) {
+            if (entries[j].symbol == sorted[i].symbol &&
+                entries[j].length == len) {
+                entries[j].code = code;
+                break;
+            }
+        }
     }
-    strip_newline(line);
-    decode(root, line);
+
+    for (i = 0; i < n; i++) {
+        format_code(entries[i].code, entries[i].length, bits);
+        if (i + 1 < n)
+            printf("%d %s\n", entries[i].symbol, bits);
+        else
+            printf("%d %s", entries[i].symbol, bits);
+    }
+
     return 0;
 }
