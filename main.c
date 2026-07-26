@@ -14,14 +14,14 @@ typedef struct Node {
     struct Node *right;
 } Node;
 
-static Node nodes[MAX_NODES];
-static int node_count;
-static int seq_counter;
+Node nodes[MAX_NODES];
+int node_count;
+int seq_counter;
 
-static Node *heap[MAX_NODES];
-static int heap_size;
+Node *heap[MAX_NODES];
+int heap_size;
 
-static int node_less(const Node *a, const Node *b) {
+int node_less(const Node *a, const Node *b) {
     if (a->freq != b->freq)
         return a->freq < b->freq;
     /* Same frequency: prefer original leaves over merged internals, then
@@ -33,13 +33,13 @@ static int node_less(const Node *a, const Node *b) {
     return a->seq < b->seq;
 }
 
-static void heap_swap(int i, int j) {
+void heap_swap(int i, int j) {
     Node *t = heap[i];
     heap[i] = heap[j];
     heap[j] = t;
 }
 
-static void heap_up(int i) {
+void heap_up(int i) {
     while (i > 0) {
         int p = (i - 1) / 2;
         if (!node_less(heap[i], heap[p]))
@@ -49,7 +49,7 @@ static void heap_up(int i) {
     }
 }
 
-static void heap_down(int i) {
+void heap_down(int i) {
     for (;;) {
         int l = 2 * i + 1, r = 2 * i + 2, best = i;
         if (l < heap_size && node_less(heap[l], heap[best]))
@@ -63,13 +63,13 @@ static void heap_down(int i) {
     }
 }
 
-static void heap_push(Node *n) {
+void heap_push(Node *n) {
     heap[heap_size] = n;
     heap_up(heap_size);
     heap_size++;
 }
 
-static Node *heap_pop(void) {
+Node *heap_pop(void) {
     Node *n = heap[0];
     heap_size--;
     if (heap_size > 0) {
@@ -79,7 +79,7 @@ static Node *heap_pop(void) {
     return n;
 }
 
-static Node *new_node(int freq, unsigned char byte, int is_leaf,
+Node *new_node(int freq, unsigned char byte, int is_leaf,
                       Node *left, Node *right) {
     Node *n = &nodes[node_count++];
     n->freq = freq;
@@ -91,10 +91,9 @@ static Node *new_node(int freq, unsigned char byte, int is_leaf,
     return n;
 }
 
-static char codes[256][MAX_CODE];
-static int has_code[256];
+char codes[256][MAX_CODE];
 
-static void assign_codes(Node *n, char *path, int depth) {
+void assign_codes(Node *n, char *path, int depth) {
     if (n->is_leaf) {
         if (depth == 0) {
             codes[n->byte][0] = '0';
@@ -103,7 +102,6 @@ static void assign_codes(Node *n, char *path, int depth) {
             path[depth] = '\0';
             memcpy(codes[n->byte], path, (size_t)depth + 1);
         }
-        has_code[n->byte] = 1;
         return;
     }
     path[depth] = '0';
@@ -112,22 +110,21 @@ static void assign_codes(Node *n, char *path, int depth) {
     assign_codes(n->right, path, depth + 1);
 }
 
-static void print_byte_repr(unsigned char b) {
-    /* Same convention as frequency lesson: printable as-is. */
-    if (b >= 32 && b < 127 && b != ' ')
-        putchar((char)b);
-    else
-        printf("\\x%02x", b);
-}
-
-static void huffman_codes(const unsigned char *data, size_t len) {
+void huffman_encode(const unsigned char *data, size_t len) {
     int freq[256] = {0};
     size_t i;
+    size_t bit_count = 0;
+    char *out;
+    size_t out_pos = 0;
+
+    if (len == 0) {
+        printf("bits=0\n\n");
+        return;
+    }
 
     node_count = 0;
     seq_counter = 0;
     heap_size = 0;
-    memset(has_code, 0, sizeof has_code);
 
     for (i = 0; i < len; i++)
         freq[data[i]]++;
@@ -137,49 +134,65 @@ static void huffman_codes(const unsigned char *data, size_t len) {
             heap_push(new_node(freq[i], (unsigned char)i, 1, NULL, NULL));
     }
 
-    if (heap_size == 0)
-        return;
-
     if (heap_size == 1) {
         Node *only = heap_pop();
-        print_byte_repr(only->byte);
-        printf(" 0\n");
-        return;
-    }
-
-    while (heap_size > 1) {
-        Node *a = heap_pop();
-        Node *b = heap_pop();
-        unsigned char mb = a->byte < b->byte ? a->byte : b->byte;
-        heap_push(new_node(a->freq + b->freq, mb, 0, a, b));
-    }
-
-    {
-        char path[MAX_CODE];
-        assign_codes(heap_pop(), path, 0);
-    }
-
-    for (i = 0; i < 256; i++) {
-        if (has_code[i]) {
-            print_byte_repr((unsigned char)i);
-            printf(" %s\n", codes[i]);
+        codes[only->byte][0] = '0';
+        codes[only->byte][1] = '\0';
+    } else {
+        while (heap_size > 1) {
+            Node *a = heap_pop();
+            Node *b = heap_pop();
+            unsigned char mb = a->byte < b->byte ? a->byte : b->byte;
+            heap_push(new_node(a->freq + b->freq, mb, 0, a, b));
+        }
+        {
+            char path[MAX_CODE];
+            assign_codes(heap_pop(), path, 0);
         }
     }
-}
 
-static void strip_newline(char *s) {
-    size_t n = strlen(s);
-    if (n > 0 && s[n - 1] == '\n')
-        s[n - 1] = '\0';
+    for (i = 0; i < len; i++)
+        bit_count += strlen(codes[data[i]]);
+
+    out = malloc(bit_count + 1);
+    if (!out) {
+        fprintf(stderr, "out of memory\n");
+        exit(1);
+    }
+
+    for (i = 0; i < len; i++) {
+        const char *c = codes[data[i]];
+        size_t n = strlen(c);
+        memcpy(out + out_pos, c, n);
+        out_pos += n;
+    }
+    out[out_pos] = '\0';
+
+    printf("bits=%zu\n%s\n", bit_count, out);
+    free(out);
 }
 
 int main(void) {
-    char line[4096];
-    while (fgets(line, sizeof line, stdin)) {
-        strip_newline(line);
-        if (line[0] == '\0')
-            continue;
-        huffman_codes((const unsigned char *)line, strlen(line));
+    unsigned char *data = NULL;
+    size_t len = 0, cap = 0;
+    int ch;
+
+    while ((ch = getchar()) != EOF) {
+        if (len + 1 > cap) {
+            size_t ncap = cap ? cap * 2 : 4096;
+            unsigned char *nd = realloc(data, ncap);
+            if (!nd) {
+                free(data);
+                fprintf(stderr, "out of memory\n");
+                return 1;
+            }
+            data = nd;
+            cap = ncap;
+        }
+        data[len++] = (unsigned char)ch;
     }
+
+    huffman_encode(data, len);
+    free(data);
     return 0;
 }
