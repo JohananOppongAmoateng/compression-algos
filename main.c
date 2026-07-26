@@ -95,12 +95,17 @@ int main(void) {
         }
     }
 
-    for (i = 0; i < n; i++) {
-        format_code(entries[i].code, entries[i].length, bits);
-        if (i + 1 < n)
-            printf("%d %s\n", entries[i].symbol, bits);
-        else
+    {
+        int first = 1;
+        for (i = 0; i < n; i++) {
+            if (entries[i].length == 0)
+                continue; /* unused symbol — omit from codebook */
+            format_code(entries[i].code, entries[i].length, bits);
+            if (!first)
+                putchar('\n');
             printf("%d %s", entries[i].symbol, bits);
+            first = 0;
+        }
     }
 
     return 0;
