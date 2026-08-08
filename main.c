@@ -204,74 +204,96 @@ unsigned char *decode(const char *bits, size_t nbits, const Model *m, size_t *ou
     return out;
 }
 
+static unsigned int hash3(const unsigned char *p) {
+    return ((p[0] * 31u + p[1]) * 31u + p[2]) % 256u;
+}
+
 int main(void) {
-    unsigned char *out = NULL;
+    unsigned char *data = NULL;
     size_t len = 0, cap = 0;
-    char line[256];
+    size_t head[256];
+    size_t *prev;
+    size_t pos;
+    int ch;
 
-    while (fgets(line, sizeof line, stdin)) {
-        if (strncmp(line, "LIT ", 4) == 0) {
-            if (len == cap) {
-                size_t ncap = cap ? cap * 2 : 64;
-                unsigned char *nd = realloc(out, ncap);
+    while ((ch = getchar()) != EOF) {
+        if (len == cap) {
+            size_t ncap = cap ? cap * 2 : 4096;
+            unsigned char *nd = realloc(data, ncap);
 
-                if (!nd) {
-                    free(out);
-                    return 1;
-                }
-                out = nd;
-                cap = ncap;
-            }
-            out[len++] = (unsigned char)line[4];
-        } else if (strncmp(line, "MATCH ", 6) == 0) {
-            size_t offset, match_length, i;
-            size_t needed;
-
-            if (sscanf(line + 6, "%zu %zu", &offset, &match_length) != 2 ||
-                offset == 0 || offset > len ||
-                match_length > SIZE_MAX - len) {
-                free(out);
+            if (!nd) {
+                free(data);
                 return 1;
             }
+            data = nd;
+            cap = ncap;
+        }
+        data[len++] = (unsigned char)ch;
+    }
 
-            needed = len + match_length;
-            if (needed > cap) {
-                size_t ncap = cap ? cap : 64;
+    prev = len ? malloc(len * sizeof *prev) : NULL;
+    if (len && !prev) {
+        free(data);
+        return 1;
+    }
+    for (pos = 0; pos < 256; pos++)
+        head[pos] = SIZE_MAX;
 
-                while (ncap < needed) {
-                    if (ncap > SIZE_MAX / 2) {
-                        ncap = needed;
-                        break;
-                    }
-                    ncap *= 2;
+    pos = 0;
+    while (pos < len) {
+        size_t best_offset = 0;
+        size_t best_length = 0;
+        size_t consumed = 1;
+
+        if (pos + 2 < len) {
+            size_t candidate = head[hash3(data + pos)];
+
+            while (candidate != SIZE_MAX) {
+                size_t offset = pos - candidate;
+                size_t match_length = 0;
+
+                if (offset > 32)
+                    break;
+
+                while (pos + match_length < len &&
+                       data[candidate + match_length] ==
+                           data[pos + match_length])
+                    match_length++;
+
+                if (match_length > best_length ||
+                    (match_length == best_length &&
+                     match_length >= 3 && offset < best_offset)) {
+                    best_length = match_length;
+                    best_offset = offset;
                 }
 
-                unsigned char *nd = realloc(out, ncap);
-
-                if (!nd) {
-                    free(out);
-                    return 1;
-                }
-                out = nd;
-                cap = ncap;
+                candidate = prev[candidate];
             }
+        }
 
-            /* Increment len after each byte to support overlapping matches. */
-            for (i = 0; i < match_length; i++) {
-                out[len] = out[len - offset];
-                len++;
-            }
+        if (best_length >= 3) {
+            printf("MATCH %zu %zu\n", best_offset, best_length);
+            consumed = best_length;
         } else {
-            free(out);
-            return 1;
+            printf("LIT %c\n", data[pos]);
+        }
+
+        /*
+         * Add every consumed position so later searches can use bytes that
+         * were produced by an overlapping match.
+         */
+        while (consumed-- > 0) {
+            if (pos + 2 < len) {
+                unsigned int h = hash3(data + pos);
+
+                prev[pos] = head[h];
+                head[h] = pos;
+            }
+            pos++;
         }
     }
 
-    if (len > 0 && fwrite(out, 1, len, stdout) != len) {
-        free(out);
-        return 1;
-    }
-
-    free(out);
+    free(prev);
+    free(data);
     return 0;
 }
