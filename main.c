@@ -208,11 +208,7 @@ int main(void) {
     unsigned char *data = NULL;
     size_t len = 0, cap = 0;
     int ch;
-    Model model;
-    char *bits;
-    unsigned char *decoded;
-    size_t decoded_len;
-    int ok;
+    size_t pos = 0;
 
     while ((ch = getchar()) != EOF) {
         if (len + 1 > cap) {
@@ -228,15 +224,36 @@ int main(void) {
         data[len++] = (unsigned char)ch;
     }
 
-    bits = encode(data, len, &model);
-    decoded = decode(bits, strlen(bits), &model, &decoded_len);
-    ok = decoded && decoded_len == len &&
-         (len == 0 || memcmp(decoded, data, len) == 0);
+    while (pos < len) {
+        size_t max_offset = pos < 16 ? pos : 16;
+        size_t best_offset = 0;
+        size_t best_length = 0;
+        size_t offset;
 
-    printf("bits=%zu\n%s\nok=%s", strlen(bits), bits, ok ? "OK" : "FAIL");
+        /* Try shortest offsets first so equal-length matches stay most recent. */
+        for (offset = 1; offset <= max_offset; offset++) {
+            size_t match_length = 0;
 
-    free(bits);
-    free(decoded);
+            while (pos + match_length < len &&
+                   data[pos + match_length] ==
+                       data[pos + match_length - offset])
+                match_length++;
+
+            if (match_length > best_length) {
+                best_length = match_length;
+                best_offset = offset;
+            }
+        }
+
+        if (best_length >= 3) {
+            printf("MATCH %zu %zu\n", best_offset, best_length);
+            pos += best_length;
+        } else {
+            printf("LIT %c\n", data[pos]);
+            pos++;
+        }
+    }
+
     free(data);
     return 0;
 }
