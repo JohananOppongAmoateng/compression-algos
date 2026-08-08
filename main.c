@@ -400,7 +400,7 @@ int deflate_pipeline_main(void) {
     return 0;
 }
 
-int main(void) {
+int crc32_main(void) {
     uint32_t crc = UINT32_C(0xffffffff);
     int byte;
 
@@ -419,4 +419,227 @@ int main(void) {
     crc ^= UINT32_C(0xffffffff);
     printf("%08x\n", (unsigned int)crc);
     return 0;
+}
+
+int main(void) {
+    unsigned char *data = NULL;
+    unsigned char *decoded = NULL;
+    char *bits = NULL;
+    size_t len = 0, cap = 0;
+    size_t decoded_len = 0, decoded_cap = 0;
+    SymbolBuf stream = {NULL, 0, 0};
+    size_t frequencies[DEFLATE_SYMBOLS] = {0};
+    HuffNode nodes[HUFFMAN_NODES];
+    char codes[DEFLATE_SYMBOLS][MAX_CODE_LENGTH + 1] = {{0}};
+    char path[MAX_CODE_LENGTH + 1];
+    size_t pos;
+    size_t order = 0;
+    size_t compressed_bits = 0;
+    size_t bit_pos = 0;
+    size_t pending_length = 0;
+    int node_count = 0;
+    int active_count;
+    int root;
+    int symbol;
+    int saw_eob = 0;
+    int valid = 1;
+    int ch;
+
+    while ((ch = getchar()) != EOF) {
+        if (len == cap) {
+            size_t ncap = cap ? cap * 2 : 4096;
+            unsigned char *ndata = realloc(data, ncap);
+
+            if (!ndata) {
+                free(data);
+                return 1;
+            }
+            data = ndata;
+            cap = ncap;
+        }
+        data[len++] = (unsigned char)ch;
+    }
+
+    /* LZ77 encode with the lesson's 15-byte window and match limit. */
+    pos = 0;
+    while (pos < len) {
+        size_t max_offset = pos < 15 ? pos : 15;
+        size_t best_offset = 0;
+        size_t best_length = 0;
+        size_t offset;
+
+        for (offset = 1; offset <= max_offset; offset++) {
+            size_t match_length = 0;
+
+            while (match_length < 15 && pos + match_length < len &&
+                   data[pos + match_length] ==
+                       data[pos + match_length - offset])
+                match_length++;
+
+            if (match_length > best_length) {
+                best_length = match_length;
+                best_offset = offset;
+            }
+        }
+
+        if (best_length >= 3) {
+            if (!symbol_push(&stream, 256 + (int)best_length) ||
+                !symbol_push(&stream, 300 + (int)best_offset))
+                goto allocation_failure;
+            pos += best_length;
+        } else {
+            if (!symbol_push(&stream, data[pos]))
+                goto allocation_failure;
+            pos++;
+        }
+    }
+    if (!symbol_push(&stream, 256))
+        goto allocation_failure;
+
+    /* Build the Huffman tree and code table. */
+    for (pos = 0; pos < stream.len; pos++)
+        frequencies[stream.data[pos]]++;
+
+    for (symbol = 0; symbol < DEFLATE_SYMBOLS; symbol++) {
+        if (frequencies[symbol] == 0)
+            continue;
+        nodes[node_count].freq = frequencies[symbol];
+        nodes[node_count].order = order++;
+        nodes[node_count].symbol = symbol;
+        nodes[node_count].left = -1;
+        nodes[node_count].right = -1;
+        nodes[node_count].active = 1;
+        node_count++;
+    }
+
+    active_count = node_count;
+    while (active_count > 1) {
+        int left = pick_huffman_node(nodes, node_count);
+        int right;
+
+        nodes[left].active = 0;
+        right = pick_huffman_node(nodes, node_count);
+        nodes[right].active = 0;
+        nodes[node_count].freq = nodes[left].freq + nodes[right].freq;
+        nodes[node_count].order = order++;
+        nodes[node_count].symbol = -1;
+        nodes[node_count].left = left;
+        nodes[node_count].right = right;
+        nodes[node_count].active = 1;
+        node_count++;
+        active_count--;
+    }
+
+    root = pick_huffman_node(nodes, node_count);
+    assign_huffman_codes(nodes, root, path, 0, codes);
+    for (pos = 0; pos < stream.len; pos++)
+        compressed_bits += strlen(codes[stream.data[pos]]);
+
+    bits = malloc(compressed_bits + 1);
+    if (!bits)
+        goto allocation_failure;
+    for (pos = 0; pos < stream.len; pos++) {
+        size_t code_len = strlen(codes[stream.data[pos]]);
+
+        memcpy(bits + bit_pos, codes[stream.data[pos]], code_len);
+        bit_pos += code_len;
+    }
+    bits[bit_pos] = '\0';
+
+    /* Huffman-decode symbols and immediately expand their LZ77 meaning. */
+    if (nodes[root].symbol >= 0) {
+        saw_eob = nodes[root].symbol == 256;
+        valid = saw_eob;
+    } else {
+        int current = root;
+
+        for (bit_pos = 0; bit_pos < compressed_bits && !saw_eob; bit_pos++) {
+            current = bits[bit_pos] == '0'
+                          ? nodes[current].left
+                          : nodes[current].right;
+            if (nodes[current].symbol >= 0) {
+                size_t needed;
+
+                symbol = nodes[current].symbol;
+                current = root;
+                if (symbol == 256) {
+                    saw_eob = pending_length == 0;
+                    if (!saw_eob)
+                        valid = 0;
+                    break;
+                }
+
+                if (pending_length == 0 && symbol <= 255) {
+                    needed = decoded_len + 1;
+                    if (needed > decoded_cap) {
+                        size_t ncap = decoded_cap ? decoded_cap * 2 : 64;
+                        unsigned char *ndata = realloc(decoded, ncap);
+
+                        if (!ndata)
+                            goto allocation_failure;
+                        decoded = ndata;
+                        decoded_cap = ncap;
+                    }
+                    decoded[decoded_len++] = (unsigned char)symbol;
+                } else if (pending_length == 0 &&
+                           symbol >= 259 && symbol <= 271) {
+                    pending_length = (size_t)(symbol - 256);
+                } else if (pending_length > 0 &&
+                           symbol >= 301 && symbol <= 315) {
+                    size_t offset = (size_t)(symbol - 300);
+                    size_t i;
+
+                    if (offset > decoded_len ||
+                        pending_length > SIZE_MAX - decoded_len) {
+                        valid = 0;
+                        break;
+                    }
+                    needed = decoded_len + pending_length;
+                    if (needed > decoded_cap) {
+                        size_t ncap = decoded_cap ? decoded_cap : 64;
+
+                        while (ncap < needed)
+                            ncap *= 2;
+                        unsigned char *ndata = realloc(decoded, ncap);
+
+                        if (!ndata)
+                            goto allocation_failure;
+                        decoded = ndata;
+                        decoded_cap = ncap;
+                    }
+                    for (i = 0; i < pending_length; i++) {
+                        decoded[decoded_len] =
+                            decoded[decoded_len - offset];
+                        decoded_len++;
+                    }
+                    pending_length = 0;
+                } else {
+                    valid = 0;
+                    break;
+                }
+            }
+        }
+    }
+
+    valid = valid && saw_eob && decoded_len == len &&
+            (len == 0 || memcmp(decoded, data, len) == 0);
+    printf("input_bytes=%zu\n", len);
+    printf("compressed_bits=%zu\n", compressed_bits);
+    printf("ratio=%.1f%%\n",
+           len ? (double)compressed_bits * 100.0 / ((double)len * 8.0)
+               : 0.0);
+    printf("roundtrip=%s\n", valid ? "OK" : "FAIL");
+
+    free(bits);
+    free(decoded);
+    free(stream.data);
+    free(data);
+    return 0;
+
+allocation_failure:
+    free(bits);
+    free(decoded);
+    free(stream.data);
+    free(data);
+    return 1;
 }
