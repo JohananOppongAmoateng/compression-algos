@@ -204,16 +204,86 @@ unsigned char *decode(const char *bits, size_t nbits, const Model *m, size_t *ou
     return out;
 }
 
-static unsigned int hash3(const unsigned char *p) {
-    return ((p[0] * 31u + p[1]) * 31u + p[2]) % 256u;
+#define DEFLATE_SYMBOLS 316
+#define HUFFMAN_NODES   (DEFLATE_SYMBOLS * 2 - 1)
+#define MAX_CODE_LENGTH DEFLATE_SYMBOLS
+
+typedef struct {
+    size_t freq;
+    size_t order;
+    int symbol;
+    int left;
+    int right;
+    int active;
+} HuffNode;
+
+typedef struct {
+    int *data;
+    size_t len;
+    size_t cap;
+} SymbolBuf;
+
+static int symbol_push(SymbolBuf *buf, int symbol) {
+    if (buf->len == buf->cap) {
+        size_t ncap = buf->cap ? buf->cap * 2 : 64;
+        int *ndata = realloc(buf->data, ncap * sizeof *ndata);
+
+        if (!ndata)
+            return 0;
+        buf->data = ndata;
+        buf->cap = ncap;
+    }
+    buf->data[buf->len++] = symbol;
+    return 1;
+}
+
+static int pick_huffman_node(const HuffNode *nodes, int count) {
+    int best = -1;
+    int i;
+
+    for (i = 0; i < count; i++) {
+        if (!nodes[i].active)
+            continue;
+        if (best < 0 || nodes[i].freq < nodes[best].freq ||
+            (nodes[i].freq == nodes[best].freq &&
+             nodes[i].order < nodes[best].order))
+            best = i;
+    }
+    return best;
+}
+
+static void assign_huffman_codes(const HuffNode *nodes, int node,
+                                 char *path, size_t depth,
+                                 char codes[DEFLATE_SYMBOLS][MAX_CODE_LENGTH + 1]) {
+    if (nodes[node].symbol >= 0) {
+        if (depth == 0)
+            path[depth++] = '0';
+        path[depth] = '\0';
+        strcpy(codes[nodes[node].symbol], path);
+        return;
+    }
+
+    path[depth] = '0';
+    assign_huffman_codes(nodes, nodes[node].left, path, depth + 1, codes);
+    path[depth] = '1';
+    assign_huffman_codes(nodes, nodes[node].right, path, depth + 1, codes);
 }
 
 int main(void) {
     unsigned char *data = NULL;
     size_t len = 0, cap = 0;
-    size_t head[256];
-    size_t *prev;
+    SymbolBuf stream = {NULL, 0, 0};
+    size_t frequencies[DEFLATE_SYMBOLS] = {0};
+    HuffNode nodes[HUFFMAN_NODES];
+    char codes[DEFLATE_SYMBOLS][MAX_CODE_LENGTH + 1] = {{0}};
+    char path[MAX_CODE_LENGTH + 1];
     size_t pos;
+    size_t order = 0;
+    size_t encoded_bits = 0;
+    int node_count = 0;
+    int active_count;
+    int root;
+    int symbol;
     int ch;
 
     while ((ch = getchar()) != EOF) {
@@ -231,69 +301,101 @@ int main(void) {
         data[len++] = (unsigned char)ch;
     }
 
-    prev = len ? malloc(len * sizeof *prev) : NULL;
-    if (len && !prev) {
-        free(data);
-        return 1;
-    }
-    for (pos = 0; pos < 256; pos++)
-        head[pos] = SIZE_MAX;
-
     pos = 0;
     while (pos < len) {
         size_t best_offset = 0;
         size_t best_length = 0;
-        size_t consumed = 1;
+        size_t max_offset = pos < 15 ? pos : 15;
+        size_t offset;
 
-        if (pos + 2 < len) {
-            size_t candidate = head[hash3(data + pos)];
+        for (offset = 1; offset <= max_offset; offset++) {
+            size_t match_length = 0;
 
-            while (candidate != SIZE_MAX) {
-                size_t offset = pos - candidate;
-                size_t match_length = 0;
+            while (match_length < 15 && pos + match_length < len &&
+                   data[pos + match_length] ==
+                       data[pos + match_length - offset])
+                match_length++;
 
-                if (offset > 32)
-                    break;
-
-                while (pos + match_length < len &&
-                       data[candidate + match_length] ==
-                           data[pos + match_length])
-                    match_length++;
-
-                if (match_length > best_length ||
-                    (match_length == best_length &&
-                     match_length >= 3 && offset < best_offset)) {
-                    best_length = match_length;
-                    best_offset = offset;
-                }
-
-                candidate = prev[candidate];
+            if (match_length > best_length) {
+                best_length = match_length;
+                best_offset = offset;
             }
         }
 
         if (best_length >= 3) {
-            printf("MATCH %zu %zu\n", best_offset, best_length);
-            consumed = best_length;
+            if (!symbol_push(&stream, 256 + (int)best_length) ||
+                !symbol_push(&stream, 300 + (int)best_offset)) {
+                free(stream.data);
+                free(data);
+                return 1;
+            }
+            pos += best_length;
         } else {
-            printf("LIT %c\n", data[pos]);
-        }
-
-        /*
-         * Add every consumed position so later searches can use bytes that
-         * were produced by an overlapping match.
-         */
-        while (consumed-- > 0) {
-            if (pos + 2 < len) {
-                unsigned int h = hash3(data + pos);
-
-                prev[pos] = head[h];
-                head[h] = pos;
+            if (!symbol_push(&stream, data[pos])) {
+                free(stream.data);
+                free(data);
+                return 1;
             }
             pos++;
         }
     }
 
-    free(prev);
+    if (!symbol_push(&stream, 256)) {
+        free(stream.data);
+        free(data);
+        return 1;
+    }
+
+    for (pos = 0; pos < stream.len; pos++)
+        frequencies[stream.data[pos]]++;
+
+    for (symbol = 0; symbol < DEFLATE_SYMBOLS; symbol++) {
+        if (frequencies[symbol] == 0)
+            continue;
+        nodes[node_count].freq = frequencies[symbol];
+        nodes[node_count].order = order++;
+        nodes[node_count].symbol = symbol;
+        nodes[node_count].left = -1;
+        nodes[node_count].right = -1;
+        nodes[node_count].active = 1;
+        node_count++;
+    }
+
+    active_count = node_count;
+    while (active_count > 1) {
+        int left = pick_huffman_node(nodes, node_count);
+        int right;
+
+        nodes[left].active = 0;
+        right = pick_huffman_node(nodes, node_count);
+        nodes[right].active = 0;
+
+        nodes[node_count].freq = nodes[left].freq + nodes[right].freq;
+        nodes[node_count].order = order++;
+        nodes[node_count].symbol = -1;
+        nodes[node_count].left = left;
+        nodes[node_count].right = right;
+        nodes[node_count].active = 1;
+        node_count++;
+        active_count--;
+    }
+
+    root = pick_huffman_node(nodes, node_count);
+    assign_huffman_codes(nodes, root, path, 0, codes);
+
+    printf("codes:\n");
+    for (symbol = 0; symbol < DEFLATE_SYMBOLS; symbol++) {
+        if (frequencies[symbol] > 0) {
+            printf("  %d: %s\n", symbol, codes[symbol]);
+            encoded_bits += frequencies[symbol] * strlen(codes[symbol]);
+        }
+    }
+    printf("encoded_bits=%zu\n", encoded_bits);
+    for (pos = 0; pos < stream.len; pos++)
+        fputs(codes[stream.data[pos]], stdout);
+    putchar('\n');
+
+    free(stream.data);
     free(data);
     return 0;
 }
