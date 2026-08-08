@@ -205,55 +205,73 @@ unsigned char *decode(const char *bits, size_t nbits, const Model *m, size_t *ou
 }
 
 int main(void) {
-    unsigned char *data = NULL;
+    unsigned char *out = NULL;
     size_t len = 0, cap = 0;
-    int ch;
-    size_t pos = 0;
+    char line[256];
 
-    while ((ch = getchar()) != EOF) {
-        if (len + 1 > cap) {
-            size_t ncap = cap ? cap * 2 : 4096;
-            unsigned char *nd = realloc(data, ncap);
-            if (!nd) {
-                free(data);
+    while (fgets(line, sizeof line, stdin)) {
+        if (strncmp(line, "LIT ", 4) == 0) {
+            if (len == cap) {
+                size_t ncap = cap ? cap * 2 : 64;
+                unsigned char *nd = realloc(out, ncap);
+
+                if (!nd) {
+                    free(out);
+                    return 1;
+                }
+                out = nd;
+                cap = ncap;
+            }
+            out[len++] = (unsigned char)line[4];
+        } else if (strncmp(line, "MATCH ", 6) == 0) {
+            size_t offset, match_length, i;
+            size_t needed;
+
+            if (sscanf(line + 6, "%zu %zu", &offset, &match_length) != 2 ||
+                offset == 0 || offset > len ||
+                match_length > SIZE_MAX - len) {
+                free(out);
                 return 1;
             }
-            data = nd;
-            cap = ncap;
-        }
-        data[len++] = (unsigned char)ch;
-    }
 
-    while (pos < len) {
-        size_t max_offset = pos < 16 ? pos : 16;
-        size_t best_offset = 0;
-        size_t best_length = 0;
-        size_t offset;
+            needed = len + match_length;
+            if (needed > cap) {
+                size_t ncap = cap ? cap : 64;
 
-        /* Try shortest offsets first so equal-length matches stay most recent. */
-        for (offset = 1; offset <= max_offset; offset++) {
-            size_t match_length = 0;
+                while (ncap < needed) {
+                    if (ncap > SIZE_MAX / 2) {
+                        ncap = needed;
+                        break;
+                    }
+                    ncap *= 2;
+                }
 
-            while (pos + match_length < len &&
-                   data[pos + match_length] ==
-                       data[pos + match_length - offset])
-                match_length++;
+                unsigned char *nd = realloc(out, ncap);
 
-            if (match_length > best_length) {
-                best_length = match_length;
-                best_offset = offset;
+                if (!nd) {
+                    free(out);
+                    return 1;
+                }
+                out = nd;
+                cap = ncap;
             }
-        }
 
-        if (best_length >= 3) {
-            printf("MATCH %zu %zu\n", best_offset, best_length);
-            pos += best_length;
+            /* Increment len after each byte to support overlapping matches. */
+            for (i = 0; i < match_length; i++) {
+                out[len] = out[len - offset];
+                len++;
+            }
         } else {
-            printf("LIT %c\n", data[pos]);
-            pos++;
+            free(out);
+            return 1;
         }
     }
 
-    free(data);
+    if (len > 0 && fwrite(out, 1, len, stdout) != len) {
+        free(out);
+        return 1;
+    }
+
+    free(out);
     return 0;
 }
