@@ -421,7 +421,7 @@ int crc32_main(void) {
     return 0;
 }
 
-int main(void) {
+int roundtrip_compression_main(void) {
     unsigned char *data = NULL;
     unsigned char *decoded = NULL;
     char *bits = NULL;
@@ -640,6 +640,179 @@ allocation_failure:
     free(bits);
     free(decoded);
     free(stream.data);
+    free(data);
+    return 1;
+}
+
+static const unsigned char *bwt_sort_data;
+static size_t bwt_sort_length;
+
+static int compare_rotations(const void *left, const void *right) {
+    size_t a = *(const size_t *)left;
+    size_t b = *(const size_t *)right;
+    size_t i;
+
+    for (i = 0; i < bwt_sort_length; i++) {
+        unsigned char ca = bwt_sort_data[(a + i) % bwt_sort_length];
+        unsigned char cb = bwt_sort_data[(b + i) % bwt_sort_length];
+
+        if (ca < cb)
+            return -1;
+        if (ca > cb)
+            return 1;
+    }
+    return a < b ? -1 : a > b;
+}
+
+int main(void) {
+    unsigned char *data = NULL;
+    unsigned char *last = NULL;
+    unsigned char *restored_last = NULL;
+    unsigned char *decoded = NULL;
+    size_t *rotations = NULL;
+    size_t *occurrence = NULL;
+    unsigned int *mtf = NULL;
+    size_t len = 0, cap = 0;
+    size_t primary = 0;
+    size_t counts[256] = {0};
+    size_t starts[256];
+    size_t seen[256] = {0};
+    unsigned char alphabet[256];
+    size_t i;
+    int ch;
+    int ok = 1;
+
+    while ((ch = getchar()) != EOF) {
+        if (len == cap) {
+            size_t ncap = cap ? cap * 2 : 4096;
+            unsigned char *ndata = realloc(data, ncap);
+
+            if (!ndata) {
+                free(data);
+                return 1;
+            }
+            data = ndata;
+            cap = ncap;
+        }
+        data[len++] = (unsigned char)ch;
+    }
+
+    if (len > 0) {
+        if (len > SIZE_MAX / sizeof *rotations ||
+            len > SIZE_MAX / sizeof *occurrence ||
+            len > SIZE_MAX / sizeof *mtf)
+            goto allocation_failure;
+
+        rotations = malloc(len * sizeof *rotations);
+        last = malloc(len);
+        restored_last = malloc(len);
+        decoded = malloc(len);
+        occurrence = malloc(len * sizeof *occurrence);
+        mtf = malloc(len * sizeof *mtf);
+        if (!rotations || !last || !restored_last || !decoded ||
+            !occurrence || !mtf)
+            goto allocation_failure;
+
+        for (i = 0; i < len; i++)
+            rotations[i] = i;
+        bwt_sort_data = data;
+        bwt_sort_length = len;
+        qsort(rotations, len, sizeof *rotations, compare_rotations);
+
+        for (i = 0; i < len; i++) {
+            size_t start = rotations[i];
+
+            last[i] = data[(start + len - 1) % len];
+            if (start == 0)
+                primary = i;
+        }
+    }
+
+    /* Move-to-front encode the BWT last column. */
+    for (i = 0; i < 256; i++)
+        alphabet[i] = (unsigned char)i;
+    for (i = 0; i < len; i++) {
+        unsigned int index = 0;
+        unsigned char value;
+
+        while (alphabet[index] != last[i])
+            index++;
+        mtf[i] = index;
+        value = alphabet[index];
+        while (index > 0) {
+            alphabet[index] = alphabet[index - 1];
+            index--;
+        }
+        alphabet[0] = value;
+    }
+
+    /* Decode MTF back to the last column before applying inverse BWT. */
+    for (i = 0; i < 256; i++)
+        alphabet[i] = (unsigned char)i;
+    for (i = 0; i < len; i++) {
+        unsigned int index = mtf[i];
+        unsigned char value = alphabet[index];
+
+        restored_last[i] = value;
+        while (index > 0) {
+            alphabet[index] = alphabet[index - 1];
+            index--;
+        }
+        alphabet[0] = value;
+    }
+
+    /*
+     * Build the LF mapping. occurrence[i] is the rank of last[i] among
+     * equal bytes; starts[b] is the first row beginning with byte b.
+     */
+    for (i = 0; i < len; i++) {
+        occurrence[i] = seen[restored_last[i]]++;
+        counts[restored_last[i]]++;
+    }
+    starts[0] = 0;
+    for (i = 1; i < 256; i++)
+        starts[i] = starts[i - 1] + counts[i - 1];
+
+    if (len > 0) {
+        size_t row = primary;
+
+        for (i = len; i-- > 0;) {
+            unsigned char value = restored_last[row];
+
+            decoded[i] = value;
+            row = starts[value] + occurrence[row];
+        }
+    }
+
+    ok = len == 0 || memcmp(decoded, data, len) == 0;
+    printf("bwt_primary=%zu\n", primary);
+    printf("bwt_last=");
+    for (i = 0; i < len; i++)
+        printf("%02x", (unsigned int)last[i]);
+    printf("\nmtf=");
+    for (i = 0; i < len; i++) {
+        if (i > 0)
+            putchar(',');
+        printf("%u", mtf[i]);
+    }
+    printf("\nroundtrip=%s\n", ok ? "OK" : "FAIL");
+
+    free(mtf);
+    free(occurrence);
+    free(decoded);
+    free(restored_last);
+    free(last);
+    free(rotations);
+    free(data);
+    return 0;
+
+allocation_failure:
+    free(mtf);
+    free(occurrence);
+    free(decoded);
+    free(restored_last);
+    free(last);
+    free(rotations);
     free(data);
     return 1;
 }
