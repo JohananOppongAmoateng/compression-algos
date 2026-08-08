@@ -463,7 +463,7 @@ int main(void) {
     /* Use the wider LZ77 limits for the complete round-trip pipeline. */
     pos = 0;
     while (pos < len) {
-        size_t max_offset = pos < 32 ? pos : 32;
+        size_t max_offset = pos < 16 ? pos : 16;
         size_t best_offset = 0;
         size_t best_length = 0;
         size_t offset;
@@ -585,7 +585,7 @@ int main(void) {
                            symbol >= 259 && symbol <= 514) {
                     pending_length = (size_t)(symbol - 256);
                 } else if (pending_length > 0 &&
-                           symbol >= 301 && symbol <= 332) {
+                           symbol >= 301 && symbol <= 316) {
                     size_t offset = (size_t)(symbol - 300);
                     size_t i;
 
