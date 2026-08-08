@@ -204,7 +204,7 @@ unsigned char *decode(const char *bits, size_t nbits, const Model *m, size_t *ou
     return out;
 }
 
-#define DEFLATE_SYMBOLS 316
+#define DEFLATE_SYMBOLS 516
 #define HUFFMAN_NODES   (DEFLATE_SYMBOLS * 2 - 1)
 #define MAX_CODE_LENGTH DEFLATE_SYMBOLS
 
@@ -460,10 +460,10 @@ int main(void) {
         data[len++] = (unsigned char)ch;
     }
 
-    /* LZ77 encode with the lesson's 15-byte window and match limit. */
+    /* Use the wider LZ77 limits for the complete round-trip pipeline. */
     pos = 0;
     while (pos < len) {
-        size_t max_offset = pos < 15 ? pos : 15;
+        size_t max_offset = pos < 32 ? pos : 32;
         size_t best_offset = 0;
         size_t best_length = 0;
         size_t offset;
@@ -471,7 +471,7 @@ int main(void) {
         for (offset = 1; offset <= max_offset; offset++) {
             size_t match_length = 0;
 
-            while (match_length < 15 && pos + match_length < len &&
+            while (match_length < 258 && pos + match_length < len &&
                    data[pos + match_length] ==
                        data[pos + match_length - offset])
                 match_length++;
@@ -582,10 +582,10 @@ int main(void) {
                     }
                     decoded[decoded_len++] = (unsigned char)symbol;
                 } else if (pending_length == 0 &&
-                           symbol >= 259 && symbol <= 271) {
+                           symbol >= 259 && symbol <= 514) {
                     pending_length = (size_t)(symbol - 256);
                 } else if (pending_length > 0 &&
-                           symbol >= 301 && symbol <= 315) {
+                           symbol >= 301 && symbol <= 332) {
                     size_t offset = (size_t)(symbol - 300);
                     size_t i;
 
