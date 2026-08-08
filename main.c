@@ -269,7 +269,7 @@ static void assign_huffman_codes(const HuffNode *nodes, int node,
     assign_huffman_codes(nodes, nodes[node].right, path, depth + 1, codes);
 }
 
-int main(void) {
+int deflate_pipeline_main(void) {
     unsigned char *data = NULL;
     size_t len = 0, cap = 0;
     SymbolBuf stream = {NULL, 0, 0};
@@ -397,5 +397,26 @@ int main(void) {
 
     free(stream.data);
     free(data);
+    return 0;
+}
+
+int main(void) {
+    uint32_t crc = UINT32_C(0xffffffff);
+    int byte;
+
+    while ((byte = getchar()) != EOF) {
+        int bit;
+
+        crc ^= (uint32_t)(unsigned char)byte;
+        for (bit = 0; bit < 8; bit++) {
+            if (crc & 1u)
+                crc = (crc >> 1) ^ UINT32_C(0xedb88320);
+            else
+                crc >>= 1;
+        }
+    }
+
+    crc ^= UINT32_C(0xffffffff);
+    printf("%08x\n", (unsigned int)crc);
     return 0;
 }
